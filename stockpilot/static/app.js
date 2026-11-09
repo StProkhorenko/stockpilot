@@ -208,7 +208,7 @@ async function init() {
     const [result, report] = await Promise.all([getJSON("/api/catalog"), getJSON("/api/report")]);
     catalog = result;
     if (catalog.source === "m5") modelLabel = report.selected === "tweedie" ? "LightGBM · Tweedie" : "Выбранная модель";
-    byId("source").textContent = catalog.source === "m5" ? "M5 · реальные продажи" : "Синтетический пример";
+    byId("source").textContent = catalog.source === "m5" ? "M5 · исторический бэктест, 2016" : "Синтетический пример";
     for (const item of catalog.series) {
       form.elements.series.add(new Option(item.item_id + " · " + item.store_id, item.id));
     }
