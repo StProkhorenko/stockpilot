@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="StockPilot — бэктест прогноза продаж и симулятор пополнения запасов.">
+  <title>StockPilot · планирование запасов</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <header class="nav">
+    <a class="brand" href="/" aria-label="StockPilot, главная"><span class="mark" aria-hidden="true">SP</span>StockPilot</a>
+    <nav aria-label="Навигация"><a href="#workspace">Симулятор</a><a href="#quality">Бэктест</a><a href="/docs">API</a></nav>
+  </header>
+  <main>
+    <section class="hero">
+      <div>
+        <p class="eyebrow">RETAIL ANALYTICS / INVENTORY LAB</p>
+        <h1>Прогноз продаж.<br>Решение по запасам.</h1>
+        <p class="intro">Сравните две стратегии пополнения. Измените срок поставки и посмотрите, как меняются дефицит, средний остаток и условные издержки.</p>
+      </div>
+      <div class="hero-side">
+        <p id="source" class="badge">Загружаем данные</p>
+        <strong>14 дней</strong>
+        <span>горизонт каждого прогноза</span>
+      </div>
+    </section>
+    <section id="workspace" class="workspace" aria-labelledby="scenario-heading">
+      <form id="scenario" class="panel controls">
+        <p class="eyebrow">01 / ПАРАМЕТРЫ</p>
+        <h2 id="scenario-heading">Сценарий заказа</h2>
+        <label>Товар и магазин <select name="series" required></select></label>
+        <label>Период бэктеста <select name="window" required></select></label>
+        <div class="two">
+          <label>Поставка, дни<input type="number" name="lead_days" min="1" max="7" value="3" required></label>
+          <label>Буфер, дни<input type="number" name="buffer_days" min="0" max="7" step="0.5" value="1" required></label>
+          <label>Хранение, у.е./шт. в день<input type="number" name="holding_cost" min="0" max="100" step="0.01" value="0.05" required></label>
+          <label>Дефицит, у.е./шт.<input type="number" name="shortage_cost" min="0" max="1000" step="0.1" value="2" required></label>
+        </div>
+        <button type="submit" disabled>Пересчитать сценарий</button>
+        <p class="fine">Заказ раз в 7 дней. Обе стратегии начинают с одинакового остатка.</p>
+      </form>
+      <div class="panel chart-panel">
+        <div class="chart-header">
+          <div><p class="eyebrow">02 / ГРАФИК</p><h2 id="chart-title">Прогноз на 14 дней</h2></div>
+          <div class="tabs" role="group" aria-label="Тип графика">
+            <button type="button" data-chart="forecast" aria-pressed="true">Продажи</button>
+            <button type="button" data-chart="stock" aria-pressed="false">Остатки</button>
+          </div>
+        </div>
+        <p id="chart-caption" class="fine"></p>
+        <div id="chart" class="chart" aria-live="off"></div>
+        <div id="legend" class="legend"></div>
+        <p id="status" class="fine" role="status">Загружаем сценарий…</p>
+      </div>
+    </section>
+    <section class="panel result" aria-labelledby="result-heading">
+      <p class="eyebrow">03 / СИМУЛЯЦИЯ</p>
+      <h2 id="result-heading">Дефицит и стоимость запасов</h2>
+      <p id="result-caption" class="fine"></p>
+      <div id="outcomes" class="metrics"></div>
+      <p class="fine">Стоимость выражена в условных единицах. Наблюдаемые продажи используются как приближение спроса.</p>
+    </section>
+    <section id="quality" class="panel result" aria-labelledby="quality-heading">
+      <p class="eyebrow">04 / КАЧЕСТВО</p>
+      <h2 id="quality-heading">Проверка на отложенных окнах</h2>
+      <div id="report"></div>
+      <p class="fine">Бэктест воспроизводится отдельным скриптом. Оценка запасов выполнена в симуляции.</p>
+    </section>
+  </main>
+  <footer>StockPilot · локальный портфолио-проект · <a href="https://github.com/Mcompetitions/M5-methods">Данные M5</a></footer>
+</body>
+</html>
