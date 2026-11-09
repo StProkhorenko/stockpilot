@@ -1,6 +1,6 @@
 import pytest
 
-from stockpilot.inventory import Scenario, simulate, summarize_inventory
+from stockpilot.inventory import Scenario, simulate, simulate_pair, summarize_inventory
 
 
 def test_lead_and_inventory_conservation():
@@ -26,3 +26,14 @@ def test_fill_rate_weights_by_demand_and_no_demand_is_undefined():
 def test_reject_unsupported_lead(lead):
     with pytest.raises(ValueError, match="Lead time"):
         simulate([1] * 7, [[1] * 14], 1, Scenario(lead_days=lead))
+
+
+def test_final_window_has_only_three_complete_review_cycles():
+    forecasts = [[2] * 14] * 3
+    pair = {"folds": [{
+        "dates": ["2016-05-23"], "history": [2] * 28, "actual": [2] * 28,
+        "baseline": forecasts, "model": forecasts, "previous": forecasts,
+    }]}
+    results = simulate_pair(pair, Scenario())
+    assert len(results[0]["model"]["daily"]) == 21
+    assert summarize_inventory(results)["previous"]["units"] == 42

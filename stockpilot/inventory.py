@@ -61,18 +61,23 @@ def simulate_pair(pair, scenario):
     results = []
     for fold in pair["folds"]:
         initial = ceil(sum(fold["history"][-28:]) / 28 * (scenario.lead_days + REVIEW_DAYS))
-        results.append({
+        observed = fold["actual"][:len(fold["model"]) * REVIEW_DAYS]
+        run = {
             "start": fold["dates"][0],
             "initial": initial,
-            "baseline": simulate(fold["actual"], fold["baseline"], initial, scenario),
-            "model": simulate(fold["actual"], fold["model"], initial, scenario),
-        })
+            "baseline": simulate(observed, fold["baseline"], initial, scenario),
+            "model": simulate(observed, fold["model"], initial, scenario),
+        }
+        if "previous" in fold:
+            run["previous"] = simulate(observed, fold["previous"], initial, scenario)
+        results.append(run)
     return results
 
 
 def summarize_inventory(results):
     summary = {}
-    for method in ("baseline", "model"):
+    methods = ("baseline", "model", "previous") if all("previous" in fold for fold in results) else ("baseline", "model")
+    for method in methods:
         runs = [fold[method] for fold in results]
         units = sum(run["units"] for run in runs)
         lost = sum(run["lost"] for run in runs)

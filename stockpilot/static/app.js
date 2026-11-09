@@ -8,10 +8,11 @@ const tabs = document.querySelectorAll("[data-chart]");
 const number = new Intl.NumberFormat("ru-RU", {maximumFractionDigits: 1});
 const percent = new Intl.NumberFormat("ru-RU", {style: "percent", maximumFractionDigits: 1});
 const baselineNames = {last_week: "Последняя неделя", four_week: "Среднее 4 недель"};
-const colors = {model: "#008465", base: "#9c551f", actual: "#465d79"};
+const colors = {model: "#65e3d3", base: "#ffbb7d", previous: "#c6a7ff", actual: "#cdd9f7"};
 let chartMode = "forecast";
 let current;
 let catalog;
+let modelLabel = "Демо-прогноз";
 let requestVersion = 0;
 
 async function getJSON(url) {
@@ -26,7 +27,7 @@ function renderChart() {
   const title = byId("chart-title");
   const caption = byId("chart-caption");
   const baseline = baselineNames[catalog.baseline];
-  const model = catalog.source === "m5" ? "LightGBM" : "Демо-прогноз";
+  const model = modelLabel;
   let dates;
   let lines;
   if (chartMode === "forecast") {
@@ -39,14 +40,16 @@ function renderChart() {
       {name: baseline, color: colors.base, values: pad.concat(forecast.baseline[0])},
       {name: model, color: colors.model, values: pad.concat(forecast.model[0])},
     ];
+    if (forecast.previous) lines.push({name: "LightGBM v1", color: colors.previous, values: pad.concat(forecast.previous[0]), dash: "6 5"});
   } else {
     title.textContent = "Остаток на конец дня";
     caption.textContent = "Всё выбранное окно · шт.";
-    dates = forecast.dates;
+    dates = forecast.dates.slice(0, simulation.model.daily.length);
     lines = [
       {name: baseline, color: colors.base, values: simulation.baseline.daily.map((row) => row.stock)},
       {name: model, color: colors.model, values: simulation.model.daily.map((row) => row.stock)},
     ];
+    if (simulation.previous) lines.push({name: "LightGBM v1", color: colors.previous, values: simulation.previous.daily.map((row) => row.stock), dash: "6 5"});
   }
   const width = 680;
   const left = 43;
@@ -70,11 +73,11 @@ function renderChart() {
   }
   for (let i = 0; i <= 4; i += 1) {
     const level = i * step;
-    draw("line", {x1: left, x2: right, y1: y(level), y2: y(level), stroke: "#dce4db"});
-    draw("text", {x: 35, y: y(level) + 4, "text-anchor": "end", fill: "#53645f", "font-size": 12}, level);
+    draw("line", {x1: left, x2: right, y1: y(level), y2: y(level), stroke: "#333c58"});
+    draw("text", {x: 35, y: y(level) + 4, "text-anchor": "end", fill: "#adb7d4", "font-size": 12}, level);
   }
-  for (const i of [0, 7, 14, 21, dates.length - 1]) {
-    draw("text", {x: x(i), y: 229, "text-anchor": i === 0 ? "start" : i === dates.length - 1 ? "end" : "middle", fill: "#53645f", "font-size": 12}, dates[i].slice(5));
+  for (const i of [0, 7, 14, 21, dates.length - 1].filter((index) => index < dates.length)) {
+    draw("text", {x: x(i), y: 229, "text-anchor": i === 0 ? "start" : i === dates.length - 1 ? "end" : "middle", fill: "#adb7d4", "font-size": 12}, dates[i].slice(5));
   }
   if (chartMode === "forecast") {
     const boundary = (x(13) + x(14)) / 2;
@@ -82,7 +85,7 @@ function renderChart() {
   }
   for (const line of lines) {
     const points = line.values.flatMap((value, index) => value === null ? [] : [x(index) + "," + y(value)]);
-    draw("polyline", {points: points.join(" "), fill: "none", stroke: line.color, "stroke-width": 2.6, "stroke-linejoin": "round"});
+    draw("polyline", {points: points.join(" "), fill: "none", stroke: line.color, "stroke-width": 2.6, "stroke-linejoin": "round", "stroke-dasharray": line.dash || "none"});
   }
   byId("chart").replaceChildren(svg);
   byId("legend").replaceChildren(...lines.map((line) => {
@@ -93,27 +96,30 @@ function renderChart() {
   }));
 }
 
+function metricCard(label, value, reference) {
+  const card = document.createElement("div");
+  card.className = "metric";
+  for (const [tag, text] of [["span", label], ["strong", value], ["small", reference]]) {
+    const line = document.createElement(tag);
+    line.textContent = text;
+    card.append(line);
+  }
+  return card;
+}
+
 function renderOutcomes() {
-  const {baseline, model, initial} = current.simulation;
+  const {baseline, model, previous, initial} = current.simulation;
   const metrics = [
     ["Недополучено, шт.", "lost", number],
     ["Удовлетворено", "fill_rate", percent],
     ["Средний остаток, шт.", "mean_stock", number],
     ["Условные издержки", "cost", number],
   ];
-  byId("result-caption").textContent = "Выбранное окно · стартовый запас " + number.format(initial) + " шт. · " +
-    (catalog.source === "m5" ? "LightGBM" : "Демо-прогноз") + " и сезонный бейзлайн.";
+  byId("result-caption").textContent = model.daily.length + " дней симуляции · стартовый запас " + number.format(initial) +
+    " шт. · крупным шрифтом показана выбранная модель.";
   byId("outcomes").replaceChildren(...metrics.map(([label, key, format]) => {
-    const card = document.createElement("div");
-    card.className = "metric";
-    const caption = document.createElement("span");
-    caption.textContent = label;
-    const value = document.createElement("strong");
-    value.textContent = model[key] === null ? "—" : format.format(model[key]);
-    const reference = document.createElement("small");
-    reference.textContent = "Бейзлайн " + (baseline[key] === null ? "—" : format.format(baseline[key]));
-    card.append(caption, value, reference);
-    return card;
+    const show = (value) => value === null ? "—" : format.format(value);
+    return metricCard(label, show(model[key]), "Сезонный " + show(baseline[key]) + (previous ? " · v1 " + show(previous[key]) : ""));
   }));
 }
 
@@ -124,28 +130,49 @@ function renderReport(report) {
     return;
   }
   const message = document.createElement("p");
-  message.textContent = report.series + " пар товар–магазин · " + report.test.length + " окна · WAPE ниже — лучше.";
+  message.textContent = report.series + " пары товар–магазин · итоговое окно выделено отдельно.";
+  const final = report.final?.metrics;
+  if (final) {
+    const m = final.lightgbm;
+    const old = final.v1;
+    byId("highlights").replaceChildren(
+      metricCard("Итог · дневная WAPE", percent.format(m.wape), "LightGBM v1 · " + percent.format(old.wape)),
+      metricCard("Итог · недельная WAPE", percent.format(m.weekly_wape), "LightGBM v1 · " + percent.format(old.weekly_wape)),
+      metricCard("Итог · смещение", percent.format(m.bias), "LightGBM v1 · " + percent.format(old.bias)),
+      metricCard("Тестовый набор", report.series + " ряда", report.final.start + " — " + report.final.end),
+    );
+  }
   const table = document.createElement("table");
   const header = table.createTHead().insertRow();
-  for (const label of ["Окно", "WAPE · бейзлайн", "WAPE · LightGBM", "Смещение · LightGBM"]) {
+  for (const label of ["Окно", "Дневная · сезонный", "Дневная · v1", "Дневная · модель", "Недельная · модель"]) {
     const heading = document.createElement("th");
     heading.scope = "col";
     heading.textContent = label;
     header.append(heading);
   }
   const tbody = table.createTBody();
-  const add = (label, scores) => {
+  const add = (label, scores, emphasis = false) => {
     const row = tbody.insertRow();
-    [label, scores[report.baseline].wape, scores.lightgbm.wape, scores.lightgbm.bias].forEach((v) => {
-      row.insertCell().textContent = typeof v === "number" ? percent.format(v) : v;
+    row.classList.toggle("emphasis", emphasis);
+    [label, scores[report.baseline].wape, scores.v1?.wape, scores.lightgbm.wape, scores.lightgbm.weekly_wape].forEach((v) => {
+      row.insertCell().textContent = typeof v === "number" ? percent.format(v) : v ?? "—";
     });
   };
-  for (const fold of report.test) add(fold.start + " — " + fold.end, fold.metrics);
-  add("Все окна", report.totals);
+  for (const fold of report.test.filter((window) => window.start !== report.final?.start)) add(fold.start + " — " + fold.end, fold.metrics);
+  add("Четыре предыдущих окна", report.totals);
+  if (report.final) add("Итог · " + report.final.start, report.final.metrics, true);
   const wrap = document.createElement("div");
   wrap.className = "table-scroll";
   wrap.append(table);
-  element.replaceChildren(message, wrap);
+  const summary = document.createElement("p");
+  if (report.final_inventory) {
+    const {model, previous, baseline} = report.final_inventory;
+    summary.className = "fine";
+    summary.textContent = "Итоговая симуляция, " + report.final.inventory_days + " день, поставка " +
+      report.scenario.lead_days + " дня, буфер " + report.scenario.buffer_days + " день. Дефицит, шт.: " +
+      model.lost + " у выбранной модели, " + previous.lost + " у v1, " + baseline.lost + " у сезонного прогноза.";
+  }
+  element.replaceChildren(message, wrap, summary);
 }
 
 async function run() {
@@ -180,12 +207,15 @@ async function init() {
   try {
     const [result, report] = await Promise.all([getJSON("/api/catalog"), getJSON("/api/report")]);
     catalog = result;
+    if (catalog.source === "m5") modelLabel = report.selected === "tweedie" ? "LightGBM · Tweedie" : "Выбранная модель";
     byId("source").textContent = catalog.source === "m5" ? "M5 · реальные продажи" : "Синтетический пример";
     for (const item of catalog.series) {
       form.elements.series.add(new Option(item.item_id + " · " + item.store_id, item.id));
     }
     catalog.folds.forEach((fold, index) => {
-      form.elements.window.add(new Option(fold.start + " — " + fold.end, index));
+      const final = fold.start === report.final?.start;
+      form.elements.window.add(new Option((final ? "Итог · " : "") + fold.start + " — " + fold.end, index));
+      if (final) form.elements.window.value = index;
     });
     renderReport(report);
     await run();

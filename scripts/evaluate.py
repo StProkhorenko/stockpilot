@@ -12,14 +12,17 @@ import pandas as pd
 from scripts.fetch_m5 import verify
 from stockpilot.inventory import HORIZON, REVIEW_DAYS, Scenario, simulate_pair, summarize_inventory
 
-DEV = 1800
+DEV = (1744, 1772, 1800)
 TEST = (1829, 1857, 1885, 1913)
+FINAL = 1941
 WINDOW = 28
 HISTORY = 56
 STORES = ("CA_1", "TX_1", "WI_1")
 DEPARTMENTS = ("FOODS_1", "HOBBIES_1", "HOUSEHOLD_1")
 NAIVE = ("last_week", "four_week")
 MODEL = "lightgbm"
+V1 = "v1"
+CANDIDATES = (V1, "seasonal_features", "tweedie", "blend")
 
 
 def load_data(path):
@@ -58,7 +61,16 @@ def load_data(path):
     return meta, y, price, cal
 
 
-def features(y, prices, cal, origins):
+def append_final(path, meta, sales):
+    final_cols = [f"d_{day}" for day in range(1942, 1970)]
+    keys = ["store_id", "item_id"]
+    with ZipFile(path) as archive, archive.open("sales_test_evaluation.csv") as stream:
+        final = pd.read_csv(stream, usecols=[*keys, *final_cols]).set_index(keys)
+    selected = final.loc[[(row["store_id"], row["item_id"]) for row in meta], final_cols]
+    return np.concatenate((sales, selected.to_numpy(dtype=np.int16)), axis=1)
+
+
+def features(y, prices, cal, origins, enhanced=False):
     """Each row has only sales/prices before origin and target calendar data."""
     origins = np.asarray(origins, dtype=int)
     series_count = len(y)
@@ -82,26 +94,49 @@ def features(y, prices, cal, origins):
     past["last_price"] = price_now
     past["price_ratio"] = ratio
     columns.update({key: np.repeat(value.ravel(), HORIZON) for key, value in past.items()})
+    if enhanced:
+        weekday = np.arange(HORIZON) % REVIEW_DAYS
+        aligned = history[:, :, 6 - weekday[None, :] + 7 * np.arange(8)[:, None]]
+        for weeks in (2, 4, 8):
+            columns[f"weekday_mean_{weeks}"] = aligned[:, :, :weeks].mean(axis=2).ravel()
+        for width in (14, 28, HISTORY):
+            deviation = history[:, :, :width].std(axis=2)
+            columns[f"std_{width}"] = np.repeat(deviation.ravel(), HORIZON)
+        columns["recent_trend"] = np.repeat((past["mean_14"] - past["mean_56"]).ravel(), HORIZON)
     return pd.DataFrame(columns)
 
 
-def forecast_fold(y, prices, cal, start):
-    # Freeze model at the beginning of each fold. Weekly predictions use newly observed history.
-    origins = np.arange(max(HISTORY, start - 730), start - HORIZON + 1, 4)
+def fit_predict(y, prices, cal, start, review, variant):
+    enhanced = variant != V1
+    history_days = 1050 if enhanced else 730
+    origins = np.arange(max(HISTORY, start - history_days), start - HORIZON + 1, 4)
     target = origins[:, None] + np.arange(HORIZON)
-    train_x = features(y, prices, cal, origins)
+    train_x = features(y, prices, cal, origins, enhanced)
     training = lgb.Dataset(train_x, label=y[:, target].ravel(), categorical_feature=["series"])
     model = lgb.train({
-        "objective": "poisson", "learning_rate": 0.055, "num_leaves": 27,
+        "objective": "tweedie" if variant == "tweedie" else "poisson",
+        "learning_rate": 0.055, "num_leaves": 27,
         "min_child_samples": 60, "lambda_l2": 1.0, "num_threads": 4, "seed": 42,
         "deterministic": True, "force_col_wise": True, "verbosity": -1,
     }, training, num_boost_round=190)
-    review = start + np.arange(0, WINDOW, REVIEW_DAYS)
-    forecast = model.predict(features(y, prices, cal, review), num_threads=4).reshape(len(y), len(review), HORIZON)
+    return model.predict(features(y, prices, cal, review, enhanced), num_threads=4).reshape(len(y), len(review), HORIZON)
+
+
+def forecast_fold(y, prices, cal, start, candidates):
+    # Weekly forecasts use newly observed history. Only issue complete forecast horizons.
+    review = np.arange(start, min(start + WINDOW, len(cal[0]) - HORIZON + 1), REVIEW_DAYS)
     weekday = np.arange(HORIZON) % REVIEW_DAYS
     past_days = review[:, None, None] + weekday[None, None, :] - REVIEW_DAYS * np.arange(1, 5)[None, :, None]
     past = y[:, past_days]
-    return {"last_week": past[:, :, 0], "four_week": past.mean(axis=2), MODEL: forecast}
+    forecasts = {"last_week": past[:, :, 0], "four_week": past.mean(axis=2)}
+    for variant in candidates:
+        if variant != "blend":
+            forecasts[variant] = fit_predict(y, prices, cal, start, review, variant)
+    if "blend" in candidates:
+        if "seasonal_features" not in forecasts:
+            forecasts["seasonal_features"] = fit_predict(y, prices, cal, start, review, "seasonal_features")
+        forecasts["blend"] = .8 * forecasts["seasonal_features"] + .2 * forecasts["four_week"]
+    return forecasts
 
 
 def metrics(actual, prediction):
@@ -116,12 +151,37 @@ def metrics(actual, prediction):
     }
 
 
-def forecast_scores(y, start, forecasts, indices=slice(None)):
-    actual = y[indices, start:start + WINDOW]
+def scored_forecast(values):
     # Nonoverlapping 14-day forecasts issued on days 1 and 15.
+    return values[:, [0, 2]].reshape(len(values), WINDOW)
+
+
+def score_windows(y, windows):
+    actual = np.concatenate([y[:, start:start + WINDOW] for start, _ in windows], axis=1)
+    predictions = {
+        name: np.concatenate([scored_forecast(values[name]) for _, values in windows], axis=1)
+        for name in windows[0][1]
+    }
+    return actual, predictions
+
+
+def summarize_forecasts(actual, predictions):
+    weekly = actual.reshape(len(actual), -1, REVIEW_DAYS).sum(axis=2)
+    scores = {}
+    for name, forecast in predictions.items():
+        scores[name] = {
+            **metrics(actual, forecast),
+            "weekly_wape": metrics(weekly, forecast.reshape(len(actual), -1, REVIEW_DAYS).sum(axis=2))["wape"],
+        }
+    return scores
+
+
+def fold_view(y, forecasts, start, dates, baseline):
+    actual, predictions = score_windows(y, [(start, forecasts)])
     return {
-        name: metrics(actual, values[indices, ::2].reshape(len(actual), WINDOW))
-        for name, values in forecasts.items()
+        "start": dates[start], "end": dates[start + WINDOW - 1],
+        "inventory_days": len(forecasts[baseline][0]) * REVIEW_DAYS,
+        "metrics": summarize_forecasts(actual, predictions),
     }
 
 
@@ -139,20 +199,24 @@ def main():
     verify(args.archive)
     meta, y, price, cal = load_data(args.archive)
     dates = cal[0].dt.strftime("%Y-%m-%d").tolist()
-    dev = forecast_scores(y, DEV, forecast_fold(y, price, cal, DEV))
+    tuning = []
+    for start in DEV:
+        tuning.append((start, forecast_fold(y, price, cal, start, CANDIDATES)))
+        print(f"Tuning {dates[start]} complete", flush=True)
+    dev = summarize_forecasts(*score_windows(y, tuning))
     baseline = min(NAIVE, key=lambda name: dev[name]["wape"])
-    print(f"Dev baseline: {baseline} {dev[baseline]['wape']:.4f}", flush=True)
+    eligible = [name for name in CANDIDATES if abs(dev[name]["bias"]) <= .10]
+    selected = min(eligible or CANDIDATES, key=lambda name: dev[name]["wape"])
+    print(json.dumps({"selected": selected, "baseline": baseline, "tuning": dev}), flush=True)
+    y = append_final(args.archive, meta, y)
     pairs = [{**row, "id": f"{row['store_id']}:{row['item_id']}", "folds": []} for row in meta]
-    test = []
-    evaluations = {method: [] for method in (*NAIVE, MODEL)}
-    actuals = []
-    for start in TEST:
-        forecasts = forecast_fold(y, price, cal, start)
-        fold = forecast_scores(y, start, forecasts)
-        test.append({"start": dates[start], "end": dates[start + WINDOW - 1], "metrics": fold})
-        actuals.append(y[:, start:start + WINDOW])
-        for name, values in forecasts.items():
-            evaluations[name].append(values[:, ::2].reshape(len(y), WINDOW))
+    views = []
+    windows = []
+    for start in (*TEST, FINAL):
+        forecasts = forecast_fold(y, price, cal, start, dict.fromkeys((V1, selected)))
+        forecasts = {**{name: forecasts[name] for name in (*NAIVE, V1)}, MODEL: forecasts[selected]}
+        views.append(fold_view(y, forecasts, start, dates, baseline))
+        windows.append((start, forecasts))
         for index, pair in enumerate(pairs):
             pair["folds"].append({
                 "history_dates": dates[start - 28:start],
@@ -160,28 +224,31 @@ def main():
                 "dates": dates[start:start + WINDOW],
                 "actual": y[index, start:start + WINDOW].tolist(),
                 "baseline": forecasts[baseline][index].round(5).tolist(),
+                "previous": forecasts[V1][index].round(5).tolist(),
                 "model": forecasts[MODEL][index].round(5).tolist(),
             })
-        print(dates[start], f"baseline {fold[baseline]['wape']:.4f}", f"model {fold[MODEL]['wape']:.4f}", flush=True)
+        print(dates[start], views[-1]["metrics"], flush=True)
 
-    actual = np.concatenate(actuals, axis=1)
-    prediction = {name: np.concatenate(values, axis=1) for name, values in evaluations.items()}
-    totals = {name: metrics(actual, values) for name, values in prediction.items()}
+    actual, prediction = score_windows(y, windows[:-1])
+    totals = summarize_forecasts(actual, prediction)
     by_department = {
-        dept: {name: metrics(actual[indices], values[indices]) for name, values in prediction.items()}
+        dept: summarize_forecasts(actual[indices], {name: values[indices] for name, values in prediction.items()})
         for dept in DEPARTMENTS
         for indices in [np.array([row["dept_id"] == dept for row in meta])]
     }
     scenario = Scenario()
-    inventory = summarize_inventory([fold for pair in pairs for fold in simulate_pair(pair, scenario)])
+    runs = [simulate_pair(pair, scenario) for pair in pairs]
+    inventory = summarize_inventory([fold for run in runs for fold in run[:-1]])
+    final_inventory = summarize_inventory([run[-1] for run in runs])
     tradeoffs = []
     for buffer in (0, 1, 2, 3):
         setting = Scenario(buffer_days=buffer)
-        results = [fold for pair in pairs for fold in simulate_pair(pair, setting)]
+        results = [fold for pair in pairs for fold in simulate_pair(pair, setting)[:-1]]
         tradeoffs.append({"buffer_days": buffer, "metrics": summarize_inventory(results)})
     report = {
-        "series": len(pairs), "dev_start": dates[DEV], "dev_end": dates[DEV + WINDOW - 1],
-        "baseline": baseline, "dev": dev, "test": test, "totals": totals,
+        "series": len(pairs), "dev_start": dates[DEV[0]], "dev_end": dates[DEV[-1] + WINDOW - 1],
+        "baseline": baseline, "selected": selected, "dev": dev, "test": views, "totals": totals,
+        "final": views[-1], "final_inventory": final_inventory,
         "by_department": by_department, "inventory": inventory, "tradeoffs": tradeoffs,
         "scenario": vars(scenario),
     }

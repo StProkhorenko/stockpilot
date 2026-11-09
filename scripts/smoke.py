@@ -33,6 +33,12 @@ def main():
     assert len(result["simulation"]["baseline"]["daily"]) == 28
     report = json.loads(get("/api/report"))
     assert report["series"] == len(catalog["series"])
+    if "final" in report:
+        params = urlencode({"series": catalog["series"][0]["id"], "window": len(catalog["folds"]) - 1})
+        final = json.loads(get("/api/scenario?" + params))
+        assert len(final["forecast"]["actual"]) == 28
+        assert len(final["simulation"]["model"]["daily"]) == report["final"]["inventory_days"]
+        assert "previous" in final["simulation"]
     print(f"StockPilot HTTP smoke passed ({health['source']}, {report['series']} series)")
 
 
